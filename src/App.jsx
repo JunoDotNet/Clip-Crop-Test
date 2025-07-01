@@ -13,6 +13,8 @@ const App = () => {
   const dragOffsetRef = useRef({ x: 0, y: 0 });
   const scaleStartRef = useRef({ layerId: null, originDist: 0, initialScale: 1 });
   const rotateStartRef = useRef({ layerId: null, startAngle: 0, initialRotation: 0 });
+  const cropDraggingRef = useRef({ layerId: null, offsetX: 0, offsetY: 0 });
+  const [isCropLockedToTransform, setIsCropLockedToTransform] = useState(true);
 
 
   const displayScale = 0.5;
@@ -91,6 +93,13 @@ const App = () => {
         -width / 2, -height / 2,
         width, height
       );
+      if (currentTool === "crop") {
+        ctx.strokeStyle = "lime";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 4]);
+        ctx.strokeRect(-width / 2, -height / 2, width, height);
+        ctx.setLineDash([]);
+      }
 
       ctx.restore();
     }
@@ -161,6 +170,25 @@ const App = () => {
         initialRotation: transform.rotation,
       };
       break;
+    }
+    if (currentTool === "crop") {
+      const cropX = cx - width / 2;
+      const cropY = cy - height / 2;
+
+      const isInCrop =
+        mouse.x >= cropX &&
+        mouse.x <= cropX + width &&
+        mouse.y >= cropY &&
+        mouse.y <= cropY + height;
+
+      if (isInCrop) {
+        cropDraggingRef.current = {
+          layerId: layer.id,
+          offsetX: mouse.x - crop.x,
+          offsetY: mouse.y - crop.y,
+        };
+        break;
+      }
     }
   }
 };
@@ -244,6 +272,26 @@ const handleMouseMove = (e) => {
       )
     );
   }
+  // 🟩 CROP DRAG
+  if (currentTool === "crop" && cropDraggingRef.current.layerId !== null) {
+    const { layerId, offsetX, offsetY } = cropDraggingRef.current;
+    const mouse = getMousePos(e);
+
+    setLayers(prev =>
+      prev.map(l =>
+        l.id === layerId
+          ? {
+              ...l,
+              crop: {
+                ...l.crop,
+                x: mouse.x - offsetX,
+                y: mouse.y - offsetY,
+              },
+            }
+          : l
+      )
+    );
+  }
 };
 
 
@@ -251,6 +299,7 @@ const handleMouseMove = (e) => {
     setDraggingLayerId(null);
     scaleStartRef.current = { layerId: null, originDist: 0, initialScale: 1 };
     rotateStartRef.current = { layerId: null, startAngle: 0, initialRotation: 0 };
+    cropDraggingRef.current = { layerId: null, offsetX: 0, offsetY: 0 };
   };
 
 
