@@ -8,15 +8,12 @@ const App = () => {
   const canvasRef = useRef(null);
   const [videoPath, setVideoPath] = useState(null);
   const [layers, setLayers] = useState([]);
-
-  const [isCropping, setIsCropping] = useState(false);
-  const [cropStart, setCropStart] = useState(null);
-  const [cropEnd, setCropEnd] = useState(null);
-
   const [draggingLayerId, setDraggingLayerId] = useState(null);
+  const [currentTool, setCurrentTool] = useState("move"); // "move" | "rotate" | "scale" | "crop"
   const dragOffsetRef = useRef({ x: 0, y: 0 });
+  const scaleStartRef = useRef({ layerId: null, originDist: 0, initialScale: 1 });
+  const rotateStartRef = useRef({ layerId: null, startAngle: 0, initialRotation: 0 });
 
-  const [scalingLayerId, setScalingLayerId] = useState(null);
 
   const displayScale = 0.5;
   const videoSize = { width: 1920, height: 1080 };
@@ -41,24 +38,31 @@ const App = () => {
 
   const handleCreateLayer = () => {
     if (!videoPath) return;
-    setIsCropping(true);
-    setCropStart(null);
-    setCropEnd(null);
-  };
+    setLayers(prev => [
+      ...prev,
+      {
+        id: layerIdCounter++,
+        visible: true,
 
-  const handleScaleChange = (layerId, value) => {
-    setLayers(prev =>
-      prev.map(layer =>
-        layer.id === layerId ? { ...layer, videoScale: value } : layer
-      )
-    );
+        // Cropping system (source-space)
+        crop: { x: 0, y: 0, width: 1920, height: 1080 },  // default full video
+        videoOffset: { x: 0, y: 0 },                     // pan source within crop
+
+        // Transform system (canvas-space)
+        transform: {
+          x: 0,            // canvas position (translate)
+          y: 0,
+          scale: 1,
+          rotation: 0,     // in radians (or degrees if you prefer)
+        },
+      },
+    ]);
   };
 
   const drawLayers = () => {
     const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas?.getContext('2d');
     const video = videoRef.current;
-
     if (!canvas || !ctx || !video || video.readyState < 2) return;
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -68,58 +72,196 @@ const App = () => {
     for (const layer of layers) {
       if (!layer.visible) continue;
 
-      const { crop, videoOffset, offset, repositioning, videoScale = 1 } = layer;
+      const { crop, videoOffset, transform } = layer;
+      const { x, y, width, height } = crop;
+      const { x: offsetX, y: offsetY } = videoOffset;
+      const { x: tx, y: ty, scale, rotation } = transform;
 
-      if (repositioning) {
-        ctx.save();
-        ctx.globalAlpha = 0.3;
+      ctx.save();
 
-        // Draw the entire video aligned so crop remains in same position
-        const drawX = offset.x - (crop.x - videoOffset.x);
-        const drawY = offset.y - (crop.y - videoOffset.y);
-        ctx.drawImage(video, drawX, drawY);
+      const centerX = canvas.width / 2 + tx;
+      const centerY = canvas.height / 2 + ty;
+      ctx.translate(centerX, centerY);
+      ctx.rotate(rotation);
+      ctx.scale(scale, scale);
 
-        ctx.restore();
+      ctx.drawImage(
+        video,
+        x + offsetX, y + offsetY, width, height,
+        -width / 2, -height / 2,
+        width, height
+      );
 
-        ctx.strokeStyle = 'red';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(offset.x, offset.y, crop.width, crop.height);
-      } else {
-        // Draw cropped video, then scale inside crop
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(offset.x, offset.y, crop.width, crop.height);
-        ctx.clip();
-        ctx.translate(offset.x + crop.width / 2, offset.y + crop.height / 2);
-        ctx.scale(videoScale, videoScale);
-        ctx.drawImage(
-          video,
-          crop.x - videoOffset.x,
-          crop.y - videoOffset.y,
-          crop.width,
-          crop.height,
-          -crop.width / 2,
-          -crop.height / 2,
-          crop.width,
-          crop.height
-        );
-        ctx.restore();
-      }
+      ctx.restore();
     }
+  };  
+  
+  const getMousePos = (e) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) / displayScale,
+      y: (e.clientY - rect.top) / displayScale,
+    };
   };
 
-  // Remove the animation loop and use effect to redraw only when needed
+  const handleMouseDown = (e) => {
+  const mouse = getMousePos(e);
+  const canvasCenter = {
+    x: frameSize.width / 2,
+    y: frameSize.height / 2,
+  };
+
+  for (let i = layers.length - 1; i >= 0; i--) {
+    const layer = layers[i];
+    if (!layer.visible) continue;
+
+    const { transform, crop } = layer;
+    const { x, y, scale } = transform;
+    const width = crop.width;
+    const height = crop.height;
+
+    const cx = canvasCenter.x + x;
+    const cy = canvasCenter.y + y;
+    const w = width * scale;
+    const h = height * scale;
+
+    const dx = mouse.x - cx;
+    const dy = mouse.y - cy;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    const isInside =
+      mouse.x >= cx - w / 2 &&
+      mouse.x <= cx + w / 2 &&
+      mouse.y >= cy - h / 2 &&
+      mouse.y <= cy + h / 2;
+
+    if (currentTool === "move" && isInside) {
+      setDraggingLayerId(layer.id);
+      dragOffsetRef.current = {
+        x: mouse.x - transform.x,
+        y: mouse.y - transform.y,
+      };
+      break;
+    }
+
+    if (currentTool === "scale" && isInside) {
+      scaleStartRef.current = {
+        layerId: layer.id,
+        originDist: dist,
+        initialScale: scale,
+      };
+      break;
+    }
+
+    if (currentTool === "rotate" && isInside) {
+      const angle = Math.atan2(dy, dx); // angle from center to mouse
+      rotateStartRef.current = {
+        layerId: layer.id,
+        startAngle: angle,
+        initialRotation: transform.rotation,
+      };
+      break;
+    }
+  }
+};
+
+const handleMouseMove = (e) => {
+  const mouse = getMousePos(e);
+
+  // 🟦 MOVE
+  if (currentTool === "move" && draggingLayerId) {
+    const offset = dragOffsetRef.current;
+    setLayers(prev =>
+      prev.map(layer =>
+        layer.id === draggingLayerId
+          ? {
+              ...layer,
+              transform: {
+                ...layer.transform,
+                x: mouse.x - offset.x,
+                y: mouse.y - offset.y,
+              },
+            }
+          : layer
+      )
+    );
+  }
+
+  // 🟨 SCALE
+  if (currentTool === "scale" && scaleStartRef.current.layerId !== null) {
+    const layer = layers.find(l => l.id === scaleStartRef.current.layerId);
+    if (!layer) return;
+
+    const centerX = frameSize.width / 2 + layer.transform.x;
+    const centerY = frameSize.height / 2 + layer.transform.y;
+    const dx = mouse.x - centerX;
+    const dy = mouse.y - centerY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    const scaleRatio = dist / scaleStartRef.current.originDist;
+    const newScale = Math.max(0.1, scaleStartRef.current.initialScale * scaleRatio);
+
+    setLayers(prev =>
+      prev.map(l =>
+        l.id === layer.id
+          ? {
+              ...l,
+              transform: {
+                ...l.transform,
+                scale: newScale,
+              },
+            }
+          : l
+      )
+    );
+  }
+  // 🟥 ROTATE
+  if (currentTool === "rotate" && rotateStartRef.current.layerId !== null) {
+    const layer = layers.find(l => l.id === rotateStartRef.current.layerId);
+    if (!layer) return;
+
+    const centerX = frameSize.width / 2 + layer.transform.x;
+    const centerY = frameSize.height / 2 + layer.transform.y;
+
+    const dx = mouse.x - centerX;
+    const dy = mouse.y - centerY;
+    const currentAngle = Math.atan2(dy, dx);
+
+    const angleDelta = currentAngle - rotateStartRef.current.startAngle;
+    const newRotation = rotateStartRef.current.initialRotation + angleDelta;
+
+    setLayers(prev =>
+      prev.map(l =>
+        l.id === layer.id
+          ? {
+              ...l,
+              transform: {
+                ...l.transform,
+                rotation: newRotation,
+              },
+            }
+          : l
+      )
+    );
+  }
+};
+
+
+  const handleMouseUp = () => {
+    setDraggingLayerId(null);
+    scaleStartRef.current = { layerId: null, originDist: 0, initialScale: 1 };
+    rotateStartRef.current = { layerId: null, startAngle: 0, initialRotation: 0 };
+  };
+
+
+
   useEffect(() => {
     const video = videoRef.current;
     let rafId = null;
     let cleanup = null;
 
-    // Helper to draw when video frame changes
-    const draw = () => {
-      drawLayers();
-    };
+    const draw = () => drawLayers();
 
-    // If video supports requestVideoFrameCallback, use it for smooth updates
     if (video && 'requestVideoFrameCallback' in video) {
       let running = true;
       const onFrame = () => {
@@ -133,7 +275,6 @@ const App = () => {
         if (rafId && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(rafId);
       };
     } else if (video) {
-      // Fallback: draw on timeupdate, seeked, play
       video.addEventListener('timeupdate', draw);
       video.addEventListener('seeked', draw);
       video.addEventListener('play', draw);
@@ -144,7 +285,6 @@ const App = () => {
       };
     }
 
-    // Also draw when layers change
     draw();
 
     return () => {
@@ -152,101 +292,9 @@ const App = () => {
     };
   }, [layers, videoPath]);
 
-  const getMousePos = (e, scale = displayScale) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    return {
-      x: (e.clientX - rect.left) / scale,
-      y: (e.clientY - rect.top) / scale,
-    };
-  };
-
-  const handleCanvasMouseDown = e => {
-    const mouse = getMousePos(e);
-
-    for (let i = layers.length - 1; i >= 0; i--) {
-      const layer = layers[i];
-      const { offset, crop, repositioning, translating, videoOffset } = layer;
-
-      if (repositioning) {
-        setDraggingLayerId(layer.id);
-        dragOffsetRef.current = {
-          x: mouse.x - videoOffset.x,
-          y: mouse.y - videoOffset.y,
-        };
-        break;
-      } else if (translating) {
-        const boxX = offset.x;
-        const boxY = offset.y;
-        const boxW = crop.width;
-        const boxH = crop.height;
-
-        if (
-          mouse.x >= boxX &&
-          mouse.x <= boxX + boxW &&
-          mouse.y >= boxY &&
-          mouse.y <= boxY + boxH
-        ) {
-          setDraggingLayerId(layer.id);
-          dragOffsetRef.current = {
-            x: mouse.x,
-            y: mouse.y,
-          };
-          break;
-        }
-      }
-    }
-  };
-
-  const handleCanvasMouseUp = () => {
-    setDraggingLayerId(null);
-  };
-
-  const handleCanvasMouseMove = e => {
-    if (!draggingLayerId) return;
-
-    const mouse = getMousePos(e);
-    const dragOffset = dragOffsetRef.current;
-    const dx = mouse.x - dragOffset.x;
-    const dy = mouse.y - dragOffset.y;
-
-    setLayers(prev =>
-      prev.map(layer => {
-        if (layer.id !== draggingLayerId) return layer;
-
-        const updated = { ...layer };
-
-        if (layer.repositioning) {
-          updated.videoOffset = {
-            x: layer.videoOffset.x + dx,
-            y: layer.videoOffset.y + dy,
-          };
-        } else if (layer.translating) {
-          // Move both crop and videoOffset together
-          updated.offset = {
-            x: layer.offset.x + dx,
-            y: layer.offset.y + dy,
-          };
-          updated.crop = {
-            ...layer.crop,
-            x: layer.crop.x + dx,
-            y: layer.crop.y + dy,
-          };
-          updated.videoOffset = {
-            x: layer.videoOffset.x + dx,
-            y: layer.videoOffset.y + dy,
-          };
-        }
-
-        return updated;
-      })
-    );
-
-    dragOffsetRef.current = mouse;
-  };
-
   return (
     <div style={{ padding: 20 }}>
-      <h2>🎬 Crop Layout Test - Layers + Reposition</h2>
+      <h2>🎬 Crop Layout Test - Layers Only</h2>
       <div style={{ marginBottom: 10 }}>
         <button onClick={handleLoadVideo}>📂 Load Video</button>
       </div>
@@ -256,69 +304,14 @@ const App = () => {
         <div style={{ position: 'relative' }}>
           <div style={{ ...displayVideoSize, background: '#111', position: 'relative' }}>
             {videoPath ? (
-              <>
-                <video
-                  ref={videoRef}
-                  src={`file://${videoPath}`}
-                  width={displayVideoSize.width}
-                  height={displayVideoSize.height}
-                  controls
-                  style={{ display: 'block' }}
-                />
-                {isCropping && (
-                  <div
-                    onMouseDown={e => setCropStart(getMousePos(e))}
-                    onMouseMove={e => cropStart && setCropEnd(getMousePos(e))}
-                    onMouseUp={() => {
-                      if (!cropStart || !cropEnd) return;
-                      const x = Math.min(cropStart.x, cropEnd.x);
-                      const y = Math.min(cropStart.y, cropEnd.y);
-                      const width = Math.abs(cropEnd.x - cropStart.x);
-                      const height = Math.abs(cropEnd.y - cropStart.y);
-
-                      setLayers(prev => [
-                        ...prev,
-                        {
-                          id: layerIdCounter++,
-                          crop: { x, y, width, height },
-                          offset: { x: 0, y: 0 },
-                          videoOffset: { x: 0, y: 0 },
-                          visible: true,
-                          repositioning: false,
-                          translating: false,
-                        },
-                      ]);
-
-                      setIsCropping(false);
-                      setCropStart(null);
-                      setCropEnd(null);
-                    }}
-                    style={{
-                      position: 'absolute',
-                      top: 0,
-                      left: 0,
-                      width: displayVideoSize.width,
-                      height: displayVideoSize.height,
-                      cursor: 'crosshair',
-                    }}
-                  >
-                    {cropStart && cropEnd && (
-                      <div
-                        style={{
-                          position: 'absolute',
-                          border: '2px dashed red',
-                          background: 'rgba(255,0,0,0.1)',
-                          left: Math.min(cropStart.x, cropEnd.x) * displayScale,
-                          top: Math.min(cropStart.y, cropEnd.y) * displayScale,
-                          width: Math.abs(cropEnd.x - cropStart.x) * displayScale,
-                          height: Math.abs(cropEnd.y - cropStart.y) * displayScale,
-                          pointerEvents: 'none',
-                        }}
-                      />
-                    )}
-                  </div>
-                )}
-              </>
+              <video
+                ref={videoRef}
+                src={`file://${videoPath}`}
+                width={displayVideoSize.width}
+                height={displayVideoSize.height}
+                controls
+                style={{ display: 'block' }}
+              />
             ) : (
               <p style={{ color: '#ccc', padding: 20 }}>No video loaded</p>
             )}
@@ -346,53 +339,10 @@ const App = () => {
                     {layer.visible ? '👁️ Hide' : '🙈 Show'}
                   </button>
                   <button
-                    onClick={() =>
-                      setLayers(prev =>
-                        prev.map(l =>
-                          l.id === layer.id
-                            ? { ...l, repositioning: !l.repositioning, translating: false }
-                            : l
-                        )
-                      )
-                    }
-                  >
-                    ⚙️
-                  </button>
-                  <button
-                    onClick={() => setScalingLayerId(scalingLayerId === layer.id ? null : layer.id)}
-                    style={scalingLayerId === layer.id ? { border: '2px solid #00eaff', borderRadius: 4 } : {}}
-                  >
-                    🔲
-                  </button>
-                  <button
-                    onClick={() =>
-                      setLayers(prev =>
-                        prev.map(l =>
-                          l.id === layer.id
-                            ? { ...l, translating: !l.translating, repositioning: false }
-                            : l
-                        )
-                      )
-                    }
-                  >
-                    🏹
-                  </button>
-                  <button
                     onClick={() => setLayers(prev => prev.filter(l => l.id !== layer.id))}
                   >
                     🗑️ Delete
                   </button>
-                  {scalingLayerId === layer.id && (
-                    <input
-                      type="range"
-                      min={0.2}
-                      max={3}
-                      step={0.01}
-                      value={layer.videoScale || 1}
-                      onChange={e => handleScaleChange(layer.id, parseFloat(e.target.value))}
-                      style={{ marginLeft: 8, width: 80 }}
-                    />
-                  )}
                 </div>
               ))}
             </div>
@@ -402,14 +352,33 @@ const App = () => {
         {/* Right: Vertical Frame */}
         <div>
           <h4>📱 Vertical Frame (1080×1920)</h4>
+          <div style={{ marginBottom: 10 }}>
+            <strong>Tool: </strong>
+            {["move", "rotate", "scale", "crop"].map(tool => (
+              <button
+                key={tool}
+                onClick={() => setCurrentTool(tool)}
+                style={{
+                  marginLeft: 6,
+                  padding: "4px 8px",
+                  backgroundColor: currentTool === tool ? "#cce" : "#eee",
+                  border: "1px solid #999",
+                  cursor: "pointer"
+                }}
+              >
+                {tool}
+              </button>
+            ))}
+          </div>
+
           <canvas
             ref={canvasRef}
             width={frameSize.width}
             height={frameSize.height}
-            onMouseDown={handleCanvasMouseDown}
-            onMouseMove={handleCanvasMouseMove}
-            onMouseUp={handleCanvasMouseUp}
-            onMouseLeave={handleCanvasMouseUp}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseUp}
             style={{
               width: displayFrameSize.width,
               height: displayFrameSize.height,
