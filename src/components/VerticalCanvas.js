@@ -12,7 +12,9 @@ const VerticalCanvas = ({ canvasSize, displaySize, layers, videoRef, activeCrop 
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, canvasSize.height, canvasSize.width);
 
-    const toDraw = activeCrop ? [...layers, { id: 'live', crop: activeCrop }] : layers;
+    // Only draw layers that are not hidden
+    const visibleLayers = layers.filter(l => !l.hidden);
+    const toDraw = activeCrop ? [...visibleLayers, { id: 'live', crop: activeCrop }] : visibleLayers;
 
     for (const layer of toDraw) {
       const { crop } = layer;
@@ -47,6 +49,5 @@ const VerticalCanvas = ({ canvasSize, displaySize, layers, videoRef, activeCrop 
     </div>
   );
 };
-
 
 export default VerticalCanvas;
