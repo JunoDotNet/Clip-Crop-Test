@@ -2,8 +2,10 @@ import React, { useEffect, useRef } from 'react';
 
 const VerticalCanvas = ({ canvasSize, displaySize, layers, videoRef, activeCrop }) => {
   const canvasRef = useRef(null);
+  const animationRef = useRef();
 
-  useEffect(() => {
+  // Draw function for current video frame and visible layers
+  const draw = () => {
     const ctx = canvasRef.current?.getContext('2d');
     const video = videoRef.current;
     if (!ctx || !video || video.readyState < 2) return;
@@ -30,6 +32,21 @@ const VerticalCanvas = ({ canvasSize, displaySize, layers, videoRef, activeCrop 
         crop.height
       );
     }
+  };
+
+  // Animation loop for smooth updates
+  useEffect(() => {
+    let running = true;
+    function loop() {
+      draw();
+      if (running) animationRef.current = requestAnimationFrame(loop);
+    }
+    animationRef.current = requestAnimationFrame(loop);
+    return () => {
+      running = false;
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
+    };
+    // eslint-disable-next-line
   }, [canvasSize, layers, videoRef, activeCrop]);
 
   return (

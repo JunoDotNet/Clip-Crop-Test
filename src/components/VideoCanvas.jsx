@@ -92,7 +92,23 @@ const VideoCanvas = ({
             width={displaySize.width}
             height={displaySize.height}
             controls
-            style={{ display: 'block', pointerEvents: 'none' }}
+            style={{ display: 'block', pointerEvents: 'auto', zIndex: 0 }}
+          />
+        )}
+
+        {/* Overlay to allow pointer events to reach video controls only */}
+        {videoPath && (
+          <div
+            style={{
+              position: 'absolute',
+              left: 0,
+              width: '100%',
+              height: 48, // typical video controls height
+              bottom: 0,
+              pointerEvents: 'auto',
+              zIndex: 1,
+              background: 'transparent',
+            }}
           />
         )}
 
